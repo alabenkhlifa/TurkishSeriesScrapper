@@ -1,0 +1,29 @@
+plex:
+  url: "http://localhost:32400"
+  token: "YOUR_PLEX_TOKEN"
+  library_name: "Turkish Series"
+
+storage:
+  media_root: "/mnt/nextcloud/plex-server/media/TurkishSeries"
+  min_free_space_gb: 10
+
+scraper:
+  base_url: "https://krmzi.org"
+  check_interval_hours: 4
+
+series:
+  - name: "ورود و ذنوب"
+    slug: "مسلسل-ورود-و-ذنوب"
+    enabled: true
+  - name: "تحت الأرض"
+    slug: "مسلسل-تحت-الأرض"
+    enabled: true
+  - name: "حلم أشرف"
+    slug: "مسلسل-حلم-أشرف"
+    enabled: true
+  - name: "هذا البحر سوف يفيض"
+    slug: "مسلسل-هذا-البحر-سوف-يفيض"
+    enabled: true
+  - name: "المدينة البعيدة"
+    slug: "مسلسل-المدينة-البعيدة"
+    enabled: true
