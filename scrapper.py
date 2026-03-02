@@ -174,7 +174,7 @@ def get_episode_download_url(session, base_url, series_slug, episode_num):
 # --- Mail.ru Download ---
 
 def download_from_mailru(mailru_url, output_path):
-    """Download a file from cloud.mail.ru public link via their API."""
+    """Download a file from cloud.mail.ru public link."""
     parsed = urlparse(mailru_url)
     public_hash = parsed.path.replace("/public/", "").strip("/")
 
@@ -190,47 +190,23 @@ def download_from_mailru(mailru_url, output_path):
         "Accept": "*/*",
     })
 
-    # Step 1: Visit the public page to establish cookies
+    # Step 1: Visit the public page to establish cookies and extract weblink_get URL
     page_resp = mailru_session.get(mailru_url, timeout=30)
     page_resp.raise_for_status()
 
-    # Step 2: Extract weblink_get URL from page or dispatcher API
+    # Step 2: Extract weblink_get URL from embedded JSON in page
     weblink_get_url = None
-
-    # Try embedded JSON in page source
-    match = re.search(r'"weblink_get"\s*:\s*\[\s*\{\s*"url"\s*:\s*"([^"]+)"', page_resp.text)
+    match = re.search(r'"weblink_get":\{"count":"\d+","url":"([^"]+)"', page_resp.text)
     if match:
         weblink_get_url = match.group(1)
 
-    # Fallback: dispatcher API
     if not weblink_get_url:
-        try:
-            disp_resp = mailru_session.get(
-                "https://cloud.mail.ru/api/v2/dispatcher",
-                timeout=15,
-            )
-            if disp_resp.ok:
-                disp_data = disp_resp.json()
-                weblink_get_url = disp_data["body"]["weblink_get"][0]["url"]
-        except Exception as e:
-            logging.warning(f"Dispatcher API failed: {e}")
-
-    if not weblink_get_url:
-        raise Exception("Could not find weblink_get URL from mail.ru")
+        raise Exception("Could not find weblink_get URL from mail.ru page")
 
     logging.info(f"Got weblink_get URL: {weblink_get_url}")
 
-    # Step 3: Get download token
-    token_resp = mailru_session.get(
-        "https://cloud.mail.ru/api/v2/tokens/download",
-        timeout=15,
-    )
-    token_resp.raise_for_status()
-    token = token_resp.json()["body"]["token"]
-    logging.info("Got download token")
-
-    # Step 4: Download the file
-    download_url = f"{weblink_get_url}/{public_hash}?key={token}"
+    # Step 3: Download - weblink_get URL + public hash redirects to the actual file
+    download_url = f"{weblink_get_url}/{public_hash}"
     logging.info(f"Starting download...")
 
     # Atomic write via .part temp file
