@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from logging.handlers import RotatingFileHandler
@@ -78,8 +79,11 @@ def create_session():
 
 # --- Scraping ---
 
-def get_latest_episode_number(session, base_url, series_slug):
-    """Scrape the series page to find the latest episode number."""
+def get_latest_episode(session, base_url, series_slug):
+    """Scrape the series page to find the latest episode number and its URL.
+
+    Returns (episode_number, episode_url) or (0, None) if no episodes found.
+    """
     url = f"{base_url}/series/{quote(series_slug, safe='')}/"
     logging.info(f"Fetching series page: {unquote(url)}")
 
@@ -89,20 +93,22 @@ def get_latest_episode_number(session, base_url, series_slug):
     soup = BeautifulSoup(resp.text, "html.parser")
 
     # Episodes are listed as links containing الحلقة (episode) and a number
-    episode_numbers = []
+    episodes = {}  # ep_num -> url
     for link in soup.find_all("a", href=True):
         href = unquote(link["href"])
         match = re.search(r'الحلقة-(\d+)', href)
         if match:
-            episode_numbers.append(int(match.group(1)))
+            ep_num = int(match.group(1))
+            if ep_num not in episodes:
+                episodes[ep_num] = link["href"]
 
-    if not episode_numbers:
+    if not episodes:
         logging.warning(f"No episodes found for {series_slug}")
-        return 0
+        return 0, None
 
-    latest = max(episode_numbers)
-    logging.info(f"Latest episode: {latest} (found {len(set(episode_numbers))} unique episodes)")
-    return latest
+    latest = max(episodes.keys())
+    logging.info(f"Latest episode: {latest} (found {len(episodes)} unique episodes)")
+    return latest, episodes[latest]
 
 
 def extract_servers_from_element(element_url):
@@ -117,15 +123,32 @@ def extract_servers_from_element(element_url):
     return payload.get("servers", [])
 
 
-def get_episode_download_url(session, base_url, series_slug, episode_num):
-    """Scrape an episode page to get the cloud.mail.ru download URL."""
-    url = f"{base_url}/episode/{quote(series_slug, safe='')}-{quote('الحلقة', safe='')}-{episode_num}/"
-    logging.info(f"Fetching episode page: {unquote(url)}")
+def get_episode_servers(session, episode_url):
+    """Scrape an episode page to get all available download servers.
 
-    resp = session.get(url, timeout=30)
+    Returns a list of dicts: [{"type": "express", "url": "..."}, {"type": "arabhd", "id": "..."}]
+    """
+    logging.info(f"Fetching episode page: {unquote(episode_url)}")
+
+    resp = session.get(episode_url, timeout=30)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    available_servers = []
+    seen_types = set()
+
+    def collect_servers(servers_list):
+        for server in servers_list:
+            name = server.get("name", "").lower().strip()
+            server_id = server.get("id", "")
+            if name == "express" and "cloud.mail.ru" in server_id and "express" not in seen_types:
+                logging.info(f"Found express server: {server_id}")
+                available_servers.append({"type": "express", "url": server_id})
+                seen_types.add("express")
+            elif name == "arab hd" and server_id and "arabhd" not in seen_types:
+                logging.info(f"Found Arab HD server, id: {server_id}")
+                available_servers.append({"type": "arabhd", "id": server_id})
+                seen_types.add("arabhd")
 
     # Search all links and iframes for qesen.net redirect with base64 payload
     candidates = []
@@ -140,12 +163,7 @@ def get_episode_download_url(session, base_url, series_slug, episode_num):
         try:
             servers = extract_servers_from_element(candidate_url)
             if servers:
-                for server in servers:
-                    if server.get("name", "").lower() == "express":
-                        mailru_url = server["id"]
-                        if "cloud.mail.ru" in mailru_url:
-                            logging.info(f"Found mail.ru URL: {mailru_url}")
-                            return mailru_url
+                collect_servers(servers)
         except Exception as e:
             logging.warning(f"Failed to decode payload from {candidate_url}: {e}")
 
@@ -153,22 +171,113 @@ def get_episode_download_url(session, base_url, series_slug, episode_num):
     for script in soup.find_all("script"):
         if not script.string:
             continue
-        # Look for base64-encoded JSON in script content
         for match in re.finditer(r'post=([A-Za-z0-9+/=]+)', script.string):
             try:
                 decoded = base64.b64decode(match.group(1)).decode("utf-8")
                 payload = json.loads(decoded)
-                for server in payload.get("servers", []):
-                    if server.get("name", "").lower() == "express":
-                        mailru_url = server["id"]
-                        if "cloud.mail.ru" in mailru_url:
-                            logging.info(f"Found mail.ru URL in script: {mailru_url}")
-                            return mailru_url
+                collect_servers(payload.get("servers", []))
             except Exception:
                 continue
 
-    logging.warning(f"No express server found for episode {episode_num}")
+    if not available_servers:
+        logging.warning(f"No download servers found for {unquote(episode_url)}")
+
+    return available_servers
+
+
+# --- Arab HD Download ---
+
+def _unpack_js(packed_html):
+    """Unpack JavaScript packed with Dean Edwards' packer (eval(function(p,a,c,k,e,d){...}))."""
+    match = re.search(
+        r"eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.+?)',(\d+),(\d+),'(.+?)'\.\s*split\('\|'\)\)\)",
+        packed_html,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    p, a, c, k = match.group(1), int(match.group(2)), int(match.group(3)), match.group(4).split("|")
+
+    def base_n(num, base):
+        """Convert number to base-N string."""
+        chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        if num < base:
+            return chars[num]
+        return base_n(num // base, base) + chars[num % base]
+
+    for i in range(c - 1, -1, -1):
+        if k[i]:
+            token = base_n(i, a)
+            p = re.sub(r'\b' + token + r'\b', k[i], p)
+
+    return p
+
+
+def get_arabhd_stream_url(session, server_id):
+    """Fetch the Arab HD embed page and extract the m3u8 stream URL."""
+    embed_url = f"https://v.turkvearab.com/embed-{server_id}.html"
+    logging.info(f"Fetching Arab HD embed page: {embed_url}")
+
+    # No Referer needed - the server blocks requests with external Referer headers
+    resp = session.get(embed_url, headers={"Referer": None}, timeout=30)
+    resp.raise_for_status()
+
+    # Try direct m3u8 match first
+    page_text = resp.text
+    m3u8_match = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', page_text)
+
+    # If not found, unpack JS packer and search there
+    if not m3u8_match:
+        unpacked = _unpack_js(page_text)
+        if unpacked:
+            m3u8_match = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', unpacked)
+
+    if m3u8_match:
+        stream_url = m3u8_match.group(1)
+        stream_url = stream_url.replace("&amp;", "&")
+        logging.info(f"Found m3u8 stream URL: {stream_url[:80]}...")
+        return stream_url
+
+    logging.warning("Could not find m3u8 URL in Arab HD embed page")
     return None
+
+
+def download_from_hls(stream_url, output_path):
+    """Download an HLS stream using ffmpeg."""
+    part_path = Path(str(output_path) + ".part")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logging.info(f"Downloading HLS stream via ffmpeg...")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\nReferer: https://v.turkvearab.com/\r\n",
+        "-i", stream_url,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        str(part_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+
+    if result.returncode != 0:
+        logging.error(f"ffmpeg failed (exit {result.returncode}): {result.stderr[-500:]}")
+        if part_path.exists():
+            part_path.unlink()
+        return False
+
+    if not part_path.exists() or part_path.stat().st_size == 0:
+        logging.error("ffmpeg produced no output")
+        if part_path.exists():
+            part_path.unlink()
+        return False
+
+    part_path.rename(output_path)
+    size_mb = output_path.stat().st_size // (1024 * 1024)
+    logging.info(f"HLS download complete: {output_path.name} ({size_mb}MB)")
+    return True
 
 
 # --- Mail.ru Download ---
@@ -371,42 +480,70 @@ def main():
         logging.info(f"\n--- Processing: {series_name} ---")
 
         try:
-            latest_ep = get_latest_episode_number(session, base_url, series_slug)
-            if latest_ep == 0:
+            ep_num, ep_url = get_latest_episode(session, base_url, series_slug)
+            if ep_num == 0:
+                continue
+            ep_path = get_episode_path(media_root, series_name, ep_num)
+
+            if ep_path.exists():
+                logging.info(f"Latest episode S01E{ep_num:02d} already exists. Skipping.")
                 continue
 
-            # Download all missing episodes from 1 to latest
-            for ep_num in range(1, latest_ep + 1):
-                ep_path = get_episode_path(media_root, series_name, ep_num)
+            logging.info(f"Latest episode S01E{ep_num:02d} missing. Attempting download...")
 
-                if ep_path.exists():
+            if not check_disk_space(str(media_root), min_free_gb):
+                logging.error("Disk space low, stopping downloads")
+                continue
+
+            try:
+                servers = get_episode_servers(session, ep_url)
+
+                if not servers:
+                    logging.warning(f"No download servers found for episode {ep_num}")
                     continue
 
-                logging.info(f"Missing episode {ep_num}, attempting download...")
+                # Try servers in order: express first, then arabhd
+                server_order = ["express", "arabhd"]
+                servers_by_type = {s["type"]: s for s in servers}
+                success = False
 
-                if not check_disk_space(str(media_root), min_free_gb):
-                    logging.error("Disk space low, stopping downloads")
-                    break
+                for server_type in server_order:
+                    if server_type not in servers_by_type:
+                        continue
+                    server = servers_by_type[server_type]
 
-                try:
-                    mailru_url = get_episode_download_url(
-                        session, base_url, series_slug, ep_num
-                    )
-                    if not mailru_url:
-                        logging.warning(f"Skipping episode {ep_num} - no express server")
+                    try:
+                        if server_type == "express":
+                            logging.info(f"Trying express (mail.ru) server...")
+                            success = download_from_mailru(server["url"], ep_path)
+                        elif server_type == "arabhd":
+                            logging.info(f"Trying Arab HD server...")
+                            stream_url = get_arabhd_stream_url(session, server["id"])
+                            if stream_url:
+                                success = download_from_hls(stream_url, ep_path)
+                            else:
+                                logging.warning("Could not get Arab HD stream URL")
+
+                        if success:
+                            downloaded_any = True
+                            break
+                    except Exception as e:
+                        logging.warning(f"Server {server_type} failed: {e}")
+                        part_path = Path(str(ep_path) + ".part")
+                        if part_path.exists():
+                            part_path.unlink()
                         continue
 
-                    if download_from_mailru(mailru_url, ep_path):
-                        downloaded_any = True
+                if not success:
+                    logging.error(f"All servers failed for episode {ep_num}")
 
-                    time.sleep(5)  # Rate limit between downloads
+                time.sleep(5)
 
-                except Exception as e:
-                    logging.error(f"Failed to download episode {ep_num}: {e}")
-                    part_path = Path(str(ep_path) + ".part")
-                    if part_path.exists():
-                        part_path.unlink()
-                    continue
+            except Exception as e:
+                logging.error(f"Failed to download episode {ep_num}: {e}")
+                part_path = Path(str(ep_path) + ".part")
+                if part_path.exists():
+                    part_path.unlink()
 
         except Exception as e:
             logging.error(f"Error processing {series_name}: {e}")

@@ -27,3 +27,10 @@ series:
   - name: "المدينة البعيدة"
     slug: "مسلسل-المدينة-البعيدة"
     enabled: true
+
+download:
+  # Server priority order: tries express (mail.ru) first, then arabhd (HLS via ffmpeg)
+  # arabhd requires ffmpeg installed on the system
+  preferred_servers:
+    - "express"
+    - "arabhd"
