@@ -214,13 +214,21 @@ def _unpack_js(packed_html):
     return p
 
 
-def get_arabhd_stream_url(session, server_id):
+def get_arabhd_stream_url(server_id):
     """Fetch the Arab HD embed page and extract the m3u8 stream URL."""
     embed_url = f"https://v.turkvearab.com/embed-{server_id}.html"
     logging.info(f"Fetching Arab HD embed page: {embed_url}")
 
-    # No Referer needed - the server blocks requests with external Referer headers
-    resp = session.get(embed_url, headers={"Referer": None}, timeout=30)
+    # Use a fresh session - the embed page returns bad tokens if krmzi.org cookies are present
+    embed_session = requests.Session()
+    embed_session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    })
+    resp = embed_session.get(embed_url, timeout=30)
     resp.raise_for_status()
 
     # Try direct m3u8 match first
@@ -253,17 +261,32 @@ def download_from_hls(stream_url, output_path):
     cmd = [
         "ffmpeg",
         "-y",
-        "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\nReferer: https://v.turkvearab.com/\r\n",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-i", stream_url,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
         str(part_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last_logged_mb = 0
+    stderr_output = []
 
-    if result.returncode != 0:
-        logging.error(f"ffmpeg failed (exit {result.returncode}): {result.stderr[-500:]}")
+    for line in proc.stderr:
+        stderr_output.append(line)
+        # ffmpeg progress lines contain "size=" with current size in kB
+        size_match = re.search(r'size=\s*(\d+)kB', line)
+        if size_match:
+            current_mb = int(size_match.group(1)) // 1024
+            if current_mb >= last_logged_mb + 100:
+                last_logged_mb = (current_mb // 100) * 100
+                logging.info(f"  Progress: {current_mb}MB downloaded")
+
+    proc.wait()
+
+    if proc.returncode != 0:
+        err_tail = "".join(stderr_output[-20:])
+        logging.error(f"ffmpeg failed (exit {proc.returncode}): {err_tail[-500:]}")
         if part_path.exists():
             part_path.unlink()
         return False
@@ -331,8 +354,8 @@ def download_from_mailru(mailru_url, output_path):
             for chunk in r.iter_content(chunk_size=128 * 1024):  # 128KB chunks
                 f.write(chunk)
                 downloaded += len(chunk)
-                # Log progress every ~10MB
-                if total > 0 and downloaded % (10 * 1024 * 1024) < 128 * 1024:
+                # Log progress every ~100MB
+                if total > 0 and downloaded % (100 * 1024 * 1024) < 128 * 1024:
                     pct = (downloaded / total) * 100
                     logging.info(
                         f"  Progress: {pct:.1f}% "
@@ -518,7 +541,7 @@ def main():
                             success = download_from_mailru(server["url"], ep_path)
                         elif server_type == "arabhd":
                             logging.info(f"Trying Arab HD server...")
-                            stream_url = get_arabhd_stream_url(session, server["id"])
+                            stream_url = get_arabhd_stream_url(server["id"])
                             if stream_url:
                                 success = download_from_hls(stream_url, ep_path)
                             else:
