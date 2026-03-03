@@ -1,7 +1,6 @@
 plex:
   url: "http://localhost:32400"
   token: "YOUR_PLEX_TOKEN"
-  library_name: "Turkish Series"
 
 storage:
   media_root: "/mnt/nextcloud/plex-server/media/TurkishSeries"

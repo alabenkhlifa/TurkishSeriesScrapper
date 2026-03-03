@@ -382,59 +382,46 @@ def connect_plex(config):
 
 
 def cleanup_watched(plex, config):
-    """Delete episodes that have been watched in Plex."""
-    library_name = config["plex"]["library_name"]
+    """Delete episodes that have been watched in Plex (scans all libraries)."""
     media_root = Path(config["storage"]["media_root"])
     deleted_count = 0
 
-    try:
-        library = plex.library.section(library_name)
-    except Exception:
-        logging.info("Plex library '%s' not found, skipping cleanup", library_name)
-        return 0
-
-    for show in library.all():
-        for episode in show.episodes():
-            if not episode.isPlayed:
+    for library in plex.library.sections():
+        for show in library.all():
+            try:
+                episodes = show.episodes()
+            except Exception:
                 continue
-            for media in episode.media:
-                for part in media.parts:
-                    file_path = Path(part.file)
-                    if not file_path.exists():
-                        continue
-                    if not str(file_path).startswith(str(media_root)):
-                        continue
+            for episode in episodes:
+                if not episode.isPlayed:
+                    continue
+                for media in episode.media:
+                    for part in media.parts:
+                        file_path = Path(part.file)
+                        if not file_path.exists():
+                            continue
+                        if not str(file_path).startswith(str(media_root)):
+                            continue
 
-                    logging.info("Deleting watched: %s", file_path.name)
-                    file_path.unlink()
-                    deleted_count += 1
+                        logging.info("Deleting watched: %s", file_path.name)
+                        file_path.unlink()
+                        deleted_count += 1
 
-                    # Clean up empty directories
-                    season_dir = file_path.parent
-                    if season_dir.exists() and not any(season_dir.iterdir()):
-                        season_dir.rmdir()
-                        logging.debug("Removed empty dir: %s", season_dir.name)
+                        # Clean up empty directories
+                        season_dir = file_path.parent
+                        if season_dir.exists() and not any(season_dir.iterdir()):
+                            season_dir.rmdir()
+                            logging.debug("Removed empty dir: %s", season_dir.name)
 
-                    series_dir = season_dir.parent
-                    if series_dir.exists() and not any(series_dir.iterdir()):
-                        series_dir.rmdir()
-                        logging.debug("Removed empty dir: %s", series_dir.name)
+                        series_dir = season_dir.parent
+                        if series_dir.exists() and not any(series_dir.iterdir()):
+                            series_dir.rmdir()
+                            logging.debug("Removed empty dir: %s", series_dir.name)
 
     if deleted_count > 0:
         logging.info("Cleaned up %d watched episode(s)", deleted_count)
-        library.update()
 
     return deleted_count
-
-
-def trigger_plex_scan(plex, config):
-    """Trigger a Plex library scan."""
-    try:
-        library = plex.library.section(config["plex"]["library_name"])
-        library.update()
-        logging.info("Triggered Plex library scan")
-    except Exception as e:
-        logging.warning("Could not trigger Plex scan: %s", e)
 
 
 # --- Disk Space ---
@@ -490,8 +477,6 @@ def main():
         logging.error("Not enough disk space (need %dGB free). Aborting.", min_free_gb)
         return
 
-    downloaded_any = False
-
     for series in config.get("series", []):
         if not series.get("enabled", True):
             continue
@@ -546,7 +531,6 @@ def main():
                                 logging.warning("Could not get Arab HD stream URL")
 
                         if success:
-                            downloaded_any = True
                             break
                     except Exception as e:
                         logging.warning("Server %s failed: %s", server_type, e)
@@ -570,10 +554,6 @@ def main():
             logging.error("Error processing %s: %s", series_name, e)
 
         time.sleep(3)  # Rate limit between series
-
-    # Trigger Plex scan if anything was downloaded
-    if downloaded_any and plex:
-        trigger_plex_scan(plex, config)
 
     logging.info("TurkishSeriesScrapper finished")
 
