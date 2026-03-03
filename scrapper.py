@@ -28,7 +28,7 @@ from plexapi.server import PlexServer
 def load_config():
     config_path = Path(__file__).parent / "config.yaml"
     if not config_path.exists():
-        logging.error(f"Config file not found: {config_path}")
+        logging.error("Config file not found: %s", config_path)
         sys.exit(1)
     with open(config_path) as f:
         return yaml.safe_load(f)
@@ -85,7 +85,7 @@ def get_latest_episode(session, base_url, series_slug):
     Returns (episode_number, episode_url) or (0, None) if no episodes found.
     """
     url = f"{base_url}/series/{quote(series_slug, safe='')}/"
-    logging.info(f"Fetching series page: {unquote(url)}")
+    logging.info("Fetching series page: %s", unquote(url))
 
     resp = session.get(url, timeout=30)
     resp.raise_for_status()
@@ -103,11 +103,11 @@ def get_latest_episode(session, base_url, series_slug):
                 episodes[ep_num] = link["href"]
 
     if not episodes:
-        logging.warning(f"No episodes found for {series_slug}")
+        logging.warning("No episodes found for %s", series_slug)
         return 0, None
 
     latest = max(episodes.keys())
-    logging.info(f"Latest episode: {latest} (found {len(episodes)} unique episodes)")
+    logging.info("Latest episode: %d (found %d total)", latest, len(episodes))
     return latest, episodes[latest]
 
 
@@ -128,7 +128,7 @@ def get_episode_servers(session, episode_url):
 
     Returns a list of dicts: [{"type": "express", "url": "..."}, {"type": "arabhd", "id": "..."}]
     """
-    logging.info(f"Fetching episode page: {unquote(episode_url)}")
+    logging.info("Fetching episode page: %s", unquote(episode_url))
 
     resp = session.get(episode_url, timeout=30)
     resp.raise_for_status()
@@ -142,11 +142,9 @@ def get_episode_servers(session, episode_url):
             name = server.get("name", "").lower().strip()
             server_id = server.get("id", "")
             if name == "express" and "cloud.mail.ru" in server_id and "express" not in seen_types:
-                logging.info(f"Found express server: {server_id}")
                 available_servers.append({"type": "express", "url": server_id})
                 seen_types.add("express")
             elif name == "arab hd" and server_id and "arabhd" not in seen_types:
-                logging.info(f"Found Arab HD server, id: {server_id}")
                 available_servers.append({"type": "arabhd", "id": server_id})
                 seen_types.add("arabhd")
 
@@ -165,7 +163,7 @@ def get_episode_servers(session, episode_url):
             if servers:
                 collect_servers(servers)
         except Exception as e:
-            logging.warning(f"Failed to decode payload from {candidate_url}: {e}")
+            logging.warning("Failed to decode payload from %s: %s", candidate_url, e)
 
     # Also check inline scripts for embedded base64 data
     for script in soup.find_all("script"):
@@ -179,8 +177,10 @@ def get_episode_servers(session, episode_url):
             except Exception:
                 continue
 
+    logging.info("Found %d server(s): %s", len(available_servers),
+                 ", ".join(s["type"] for s in available_servers) or "none")
     if not available_servers:
-        logging.warning(f"No download servers found for {unquote(episode_url)}")
+        logging.warning("No download servers found for %s", unquote(episode_url))
 
     return available_servers
 
@@ -217,7 +217,7 @@ def _unpack_js(packed_html):
 def get_arabhd_stream_url(server_id):
     """Fetch the Arab HD embed page and extract the m3u8 stream URL."""
     embed_url = f"https://v.turkvearab.com/embed-{server_id}.html"
-    logging.info(f"Fetching Arab HD embed page: {embed_url}")
+    logging.info("Fetching Arab HD embed: %s", embed_url)
 
     # Use a fresh session - the embed page returns bad tokens if krmzi.org cookies are present
     embed_session = requests.Session()
@@ -244,7 +244,7 @@ def get_arabhd_stream_url(server_id):
     if m3u8_match:
         stream_url = m3u8_match.group(1)
         stream_url = stream_url.replace("&amp;", "&")
-        logging.info(f"Found m3u8 stream URL: {stream_url[:80]}...")
+        logging.debug("m3u8 URL: %s", stream_url[:80])
         return stream_url
 
     logging.warning("Could not find m3u8 URL in Arab HD embed page")
@@ -258,7 +258,7 @@ def download_from_hls(stream_url, output_path):
     # Use a temp file with ASCII name to avoid ffmpeg issues with Arabic paths
     tmp_path = output_path.parent / f".download_{os.getpid()}.mp4"
 
-    logging.info(f"Downloading HLS stream via ffmpeg...")
+    logging.info("Downloading HLS stream via ffmpeg")
 
     cmd = [
         "ffmpeg",
@@ -282,13 +282,13 @@ def download_from_hls(stream_url, output_path):
             current_mb = int(size_match.group(1)) // 1024
             if current_mb >= last_logged_mb + 100:
                 last_logged_mb = (current_mb // 100) * 100
-                logging.info(f"  Progress: {current_mb}MB downloaded")
+                logging.info("  Progress: %dMB downloaded", current_mb)
 
     proc.wait()
 
     if proc.returncode != 0:
         err_tail = "".join(stderr_output[-20:])
-        logging.error(f"ffmpeg failed (exit {proc.returncode}): {err_tail[-500:]}")
+        logging.error("ffmpeg failed (exit %d): %s", proc.returncode, err_tail[-500:])
         if tmp_path.exists():
             tmp_path.unlink()
         return False
@@ -301,7 +301,7 @@ def download_from_hls(stream_url, output_path):
 
     tmp_path.rename(output_path)
     size_mb = output_path.stat().st_size // (1024 * 1024)
-    logging.info(f"HLS download complete: {output_path.name} ({size_mb}MB)")
+    logging.info("HLS download complete: %s (%dMB)", output_path.name, size_mb)
     return True
 
 
@@ -312,7 +312,7 @@ def download_from_mailru(mailru_url, output_path):
     parsed = urlparse(mailru_url)
     public_hash = parsed.path.replace("/public/", "").strip("/")
 
-    logging.info(f"Downloading from mail.ru, hash: {public_hash}")
+    logging.info("Downloading from mail.ru, hash: %s", public_hash)
 
     mailru_session = requests.Session()
     mailru_session.headers.update({
@@ -337,11 +337,11 @@ def download_from_mailru(mailru_url, output_path):
     if not weblink_get_url:
         raise Exception("Could not find weblink_get URL from mail.ru page")
 
-    logging.info(f"Got weblink_get URL: {weblink_get_url}")
+    logging.debug("weblink_get URL: %s", weblink_get_url)
 
     # Step 3: Download - weblink_get URL + public hash redirects to the actual file
     download_url = f"{weblink_get_url}/{public_hash}"
-    logging.info(f"Starting download...")
+    logging.info("Starting mail.ru download")
 
     # Atomic write via .part temp file
     part_path = Path(str(output_path) + ".part")
@@ -359,14 +359,12 @@ def download_from_mailru(mailru_url, output_path):
                 # Log progress every ~100MB
                 if total > 0 and downloaded % (100 * 1024 * 1024) < 128 * 1024:
                     pct = (downloaded / total) * 100
-                    logging.info(
-                        f"  Progress: {pct:.1f}% "
-                        f"({downloaded // (1024 * 1024)}MB / {total // (1024 * 1024)}MB)"
-                    )
+                    logging.info("  Progress: %.1f%% (%dMB / %dMB)",
+                                 pct, downloaded // (1024 * 1024), total // (1024 * 1024))
 
     # Rename .part to final path (atomic on same filesystem)
     part_path.rename(output_path)
-    logging.info(f"Download complete: {output_path.name} ({downloaded // (1024 * 1024)}MB)")
+    logging.info("Download complete: %s (%dMB)", output_path.name, downloaded // (1024 * 1024))
     return True
 
 
@@ -376,10 +374,10 @@ def connect_plex(config):
     """Connect to Plex server."""
     try:
         plex = PlexServer(config["plex"]["url"], config["plex"]["token"])
-        logging.info(f"Connected to Plex: {plex.friendlyName}")
+        logging.info("Connected to Plex: %s", plex.friendlyName)
         return plex
     except Exception as e:
-        logging.error(f"Failed to connect to Plex: {e}")
+        logging.error("Failed to connect to Plex: %s", e)
         return None
 
 
@@ -392,7 +390,7 @@ def cleanup_watched(plex, config):
     try:
         library = plex.library.section(library_name)
     except Exception:
-        logging.info(f"Plex library '{library_name}' not found, skipping cleanup")
+        logging.info("Plex library '%s' not found, skipping cleanup", library_name)
         return 0
 
     for show in library.all():
@@ -407,7 +405,7 @@ def cleanup_watched(plex, config):
                     if not str(file_path).startswith(str(media_root)):
                         continue
 
-                    logging.info(f"Deleting watched: {file_path.name}")
+                    logging.info("Deleting watched: %s", file_path.name)
                     file_path.unlink()
                     deleted_count += 1
 
@@ -415,15 +413,15 @@ def cleanup_watched(plex, config):
                     season_dir = file_path.parent
                     if season_dir.exists() and not any(season_dir.iterdir()):
                         season_dir.rmdir()
-                        logging.info(f"Removed empty dir: {season_dir.name}")
+                        logging.debug("Removed empty dir: %s", season_dir.name)
 
                     series_dir = season_dir.parent
                     if series_dir.exists() and not any(series_dir.iterdir()):
                         series_dir.rmdir()
-                        logging.info(f"Removed empty dir: {series_dir.name}")
+                        logging.debug("Removed empty dir: %s", series_dir.name)
 
     if deleted_count > 0:
-        logging.info(f"Cleaned up {deleted_count} watched episode(s)")
+        logging.info("Cleaned up %d watched episode(s)", deleted_count)
         library.update()
 
     return deleted_count
@@ -436,7 +434,7 @@ def trigger_plex_scan(plex, config):
         library.update()
         logging.info("Triggered Plex library scan")
     except Exception as e:
-        logging.warning(f"Could not trigger Plex scan: {e}")
+        logging.warning("Could not trigger Plex scan: %s", e)
 
 
 # --- Disk Space ---
@@ -446,10 +444,10 @@ def check_disk_space(media_root, min_free_gb):
     try:
         usage = shutil.disk_usage(media_root)
         free_gb = usage.free / (1024 ** 3)
-        logging.info(f"Disk space: {free_gb:.1f}GB free")
+        logging.info("Disk space: %.1fGB free", free_gb)
         return free_gb >= min_free_gb
     except Exception as e:
-        logging.warning(f"Could not check disk space: {e}")
+        logging.warning("Could not check disk space: %s", e)
         return True  # Assume OK if we can't check
 
 
@@ -469,9 +467,7 @@ def get_episode_path(media_root, series_name, episode_num):
 
 def main():
     setup_logging()
-    logging.info("=" * 60)
     logging.info("TurkishSeriesScrapper starting")
-    logging.info("=" * 60)
 
     config = load_config()
     session = create_session()
@@ -491,7 +487,7 @@ def main():
 
     # Check disk space
     if not check_disk_space(str(media_root), min_free_gb):
-        logging.error(f"Not enough disk space (need {min_free_gb}GB free). Aborting.")
+        logging.error("Not enough disk space (need %dGB free). Aborting.", min_free_gb)
         return
 
     downloaded_any = False
@@ -502,7 +498,7 @@ def main():
 
         series_name = series["name"]
         series_slug = series["slug"]
-        logging.info(f"\n--- Processing: {series_name} ---")
+        logging.info("Processing: %s", series_name)
 
         try:
             ep_num, ep_url = get_latest_episode(session, base_url, series_slug)
@@ -511,10 +507,10 @@ def main():
             ep_path = get_episode_path(media_root, series_name, ep_num)
 
             if ep_path.exists():
-                logging.info(f"Latest episode S01E{ep_num:02d} already exists. Skipping.")
+                logging.info("S01E%02d already exists, skipping", ep_num)
                 continue
 
-            logging.info(f"Latest episode S01E{ep_num:02d} missing. Attempting download...")
+            logging.info("S01E%02d missing, downloading...", ep_num)
 
             if not check_disk_space(str(media_root), min_free_gb):
                 logging.error("Disk space low, stopping downloads")
@@ -524,7 +520,7 @@ def main():
                 servers = get_episode_servers(session, ep_url)
 
                 if not servers:
-                    logging.warning(f"No download servers found for episode {ep_num}")
+                    logging.warning("No download servers found for episode %d", ep_num)
                     continue
 
                 # Try servers in order: express first, then arabhd
@@ -539,10 +535,10 @@ def main():
 
                     try:
                         if server_type == "express":
-                            logging.info(f"Trying express (mail.ru) server...")
+                            logging.info("Trying express (mail.ru)")
                             success = download_from_mailru(server["url"], ep_path)
                         elif server_type == "arabhd":
-                            logging.info(f"Trying Arab HD server...")
+                            logging.info("Trying Arab HD")
                             stream_url = get_arabhd_stream_url(server["id"])
                             if stream_url:
                                 success = download_from_hls(stream_url, ep_path)
@@ -553,25 +549,25 @@ def main():
                             downloaded_any = True
                             break
                     except Exception as e:
-                        logging.warning(f"Server {server_type} failed: {e}")
+                        logging.warning("Server %s failed: %s", server_type, e)
                         part_path = Path(str(ep_path) + ".part")
                         if part_path.exists():
                             part_path.unlink()
                         continue
 
                 if not success:
-                    logging.error(f"All servers failed for episode {ep_num}")
+                    logging.error("All servers failed for episode %d", ep_num)
 
                 time.sleep(5)
 
             except Exception as e:
-                logging.error(f"Failed to download episode {ep_num}: {e}")
+                logging.error("Failed to download episode %d: %s", ep_num, e)
                 part_path = Path(str(ep_path) + ".part")
                 if part_path.exists():
                     part_path.unlink()
 
         except Exception as e:
-            logging.error(f"Error processing {series_name}: {e}")
+            logging.error("Error processing %s: %s", series_name, e)
 
         time.sleep(3)  # Rate limit between series
 
