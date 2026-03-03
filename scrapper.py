@@ -253,8 +253,10 @@ def get_arabhd_stream_url(server_id):
 
 def download_from_hls(stream_url, output_path):
     """Download an HLS stream using ffmpeg."""
-    part_path = Path(str(output_path) + ".part")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use a temp file with ASCII name to avoid ffmpeg issues with Arabic paths
+    tmp_path = output_path.parent / f".download_{os.getpid()}.mp4"
 
     logging.info(f"Downloading HLS stream via ffmpeg...")
 
@@ -265,7 +267,7 @@ def download_from_hls(stream_url, output_path):
         "-i", stream_url,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
-        str(part_path),
+        str(tmp_path),
     ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -287,17 +289,17 @@ def download_from_hls(stream_url, output_path):
     if proc.returncode != 0:
         err_tail = "".join(stderr_output[-20:])
         logging.error(f"ffmpeg failed (exit {proc.returncode}): {err_tail[-500:]}")
-        if part_path.exists():
-            part_path.unlink()
+        if tmp_path.exists():
+            tmp_path.unlink()
         return False
 
-    if not part_path.exists() or part_path.stat().st_size == 0:
+    if not tmp_path.exists() or tmp_path.stat().st_size == 0:
         logging.error("ffmpeg produced no output")
-        if part_path.exists():
-            part_path.unlink()
+        if tmp_path.exists():
+            tmp_path.unlink()
         return False
 
-    part_path.rename(output_path)
+    tmp_path.rename(output_path)
     size_mb = output_path.stat().st_size // (1024 * 1024)
     logging.info(f"HLS download complete: {output_path.name} ({size_mb}MB)")
     return True
