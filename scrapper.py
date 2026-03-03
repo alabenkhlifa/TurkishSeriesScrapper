@@ -18,6 +18,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlparse, parse_qs
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import yaml
 from bs4 import BeautifulSoup
 from plexapi.server import PlexServer
@@ -63,6 +65,15 @@ def setup_logging():
 
 # --- HTTP Session ---
 
+def _mount_retries(session):
+    """Mount retry adapter on a session for transient network errors."""
+    retry = Retry(total=3, backoff_factor=2, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def create_session():
     session = requests.Session()
     session.headers.update({
@@ -74,7 +85,7 @@ def create_session():
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ar,en;q=0.9",
     })
-    return session
+    return _mount_retries(session)
 
 
 # --- Scraping ---
@@ -220,7 +231,7 @@ def get_arabhd_stream_url(server_id):
     logging.info("Fetching Arab HD embed: %s", embed_url)
 
     # Use a fresh session - the embed page returns bad tokens if krmzi.org cookies are present
-    embed_session = requests.Session()
+    embed_session = _mount_retries(requests.Session())
     embed_session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -314,7 +325,7 @@ def download_from_mailru(mailru_url, output_path):
 
     logging.info("Downloading from mail.ru, hash: %s", public_hash)
 
-    mailru_session = requests.Session()
+    mailru_session = _mount_retries(requests.Session())
     mailru_session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -450,6 +461,20 @@ def get_episode_path(media_root, series_name, episode_num):
     )
 
 
+# --- Temp file cleanup ---
+
+def cleanup_stale_temp_files(media_root):
+    """Remove leftover .part and .download_* temp files from interrupted downloads."""
+    count = 0
+    for pattern in ("**/*.part", "**/.download_*.mp4"):
+        for tmp in Path(media_root).glob(pattern):
+            logging.info("Removing stale temp file: %s", tmp.name)
+            tmp.unlink()
+            count += 1
+    if count > 0:
+        logging.info("Cleaned up %d stale temp file(s)", count)
+
+
 # --- Main ---
 
 def main():
@@ -464,6 +489,9 @@ def main():
 
     # Ensure media root exists
     media_root.mkdir(parents=True, exist_ok=True)
+
+    # Clean up temp files from previous interrupted runs
+    cleanup_stale_temp_files(media_root)
 
     # Connect to Plex
     plex = connect_plex(config)
@@ -499,7 +527,7 @@ def main():
 
             if not check_disk_space(str(media_root), min_free_gb):
                 logging.error("Disk space low, stopping downloads")
-                continue
+                break
 
             try:
                 servers = get_episode_servers(session, ep_url)
