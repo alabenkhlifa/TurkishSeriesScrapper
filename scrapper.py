@@ -90,10 +90,11 @@ def create_session():
 
 # --- Scraping ---
 
-def get_latest_episode(session, base_url, series_slug):
-    """Scrape the series page to find the latest episode number and its URL.
+def get_latest_episodes(session, base_url, series_slug, count=2):
+    """Scrape the series page to find the latest episodes and their URLs.
 
-    Returns (episode_number, episode_url) or (0, None) if no episodes found.
+    Returns list of (episode_number, episode_url) tuples, newest first.
+    Returns empty list if no episodes found.
     """
     url = f"{base_url}/series/{quote(series_slug, safe='')}/"
     logging.info("Fetching series page: %s", unquote(url))
@@ -115,11 +116,12 @@ def get_latest_episode(session, base_url, series_slug):
 
     if not episodes:
         logging.warning("No episodes found for %s", series_slug)
-        return 0, None
+        return []
 
-    latest = max(episodes.keys())
-    logging.info("Latest episode: %d (found %d total)", latest, len(episodes))
-    return latest, episodes[latest]
+    latest_nums = sorted(episodes.keys(), reverse=True)[:count]
+    logging.info("Latest episodes: %s (found %d total)",
+                 ", ".join(str(n) for n in latest_nums), len(episodes))
+    return [(num, episodes[num]) for num in latest_nums]
 
 
 def extract_servers_from_element(element_url):
@@ -514,69 +516,72 @@ def main():
         logging.info("Processing: %s", series_name)
 
         try:
-            ep_num, ep_url = get_latest_episode(session, base_url, series_slug)
-            if ep_num == 0:
-                continue
-            ep_path = get_episode_path(media_root, series_name, ep_num)
-
-            if ep_path.exists():
-                logging.info("S01E%02d already exists, skipping", ep_num)
+            max_eps = config.get("download", {}).get("max_episodes_per_series", 2)
+            latest_episodes = get_latest_episodes(session, base_url, series_slug, count=max_eps)
+            if not latest_episodes:
                 continue
 
-            logging.info("S01E%02d missing, downloading...", ep_num)
+            for ep_num, ep_url in latest_episodes:
+                ep_path = get_episode_path(media_root, series_name, ep_num)
 
-            if not check_disk_space(str(media_root), min_free_gb):
-                logging.error("Disk space low, stopping downloads")
-                break
-
-            try:
-                servers = get_episode_servers(session, ep_url)
-
-                if not servers:
-                    logging.warning("No download servers found for episode %d", ep_num)
+                if ep_path.exists():
+                    logging.info("S01E%02d already exists, skipping", ep_num)
                     continue
 
-                # Try servers in order: express first, then arabhd
-                server_order = ["express", "arabhd"]
-                servers_by_type = {s["type"]: s for s in servers}
-                success = False
+                logging.info("S01E%02d missing, downloading...", ep_num)
 
-                for server_type in server_order:
-                    if server_type not in servers_by_type:
-                        continue
-                    server = servers_by_type[server_type]
+                if not check_disk_space(str(media_root), min_free_gb):
+                    logging.error("Disk space low, stopping downloads")
+                    break
 
-                    try:
-                        if server_type == "express":
-                            logging.info("Trying express (mail.ru)")
-                            success = download_from_mailru(server["url"], ep_path)
-                        elif server_type == "arabhd":
-                            logging.info("Trying Arab HD")
-                            stream_url = get_arabhd_stream_url(server["id"])
-                            if stream_url:
-                                success = download_from_hls(stream_url, ep_path)
-                            else:
-                                logging.warning("Could not get Arab HD stream URL")
+                try:
+                    servers = get_episode_servers(session, ep_url)
 
-                        if success:
-                            break
-                    except Exception as e:
-                        logging.warning("Server %s failed: %s", server_type, e)
-                        part_path = Path(str(ep_path) + ".part")
-                        if part_path.exists():
-                            part_path.unlink()
+                    if not servers:
+                        logging.warning("No download servers found for episode %d", ep_num)
                         continue
 
-                if not success:
-                    logging.error("All servers failed for episode %d", ep_num)
+                    # Try servers in order: express first, then arabhd
+                    server_order = ["express", "arabhd"]
+                    servers_by_type = {s["type"]: s for s in servers}
+                    success = False
 
-                time.sleep(5)
+                    for server_type in server_order:
+                        if server_type not in servers_by_type:
+                            continue
+                        server = servers_by_type[server_type]
 
-            except Exception as e:
-                logging.error("Failed to download episode %d: %s", ep_num, e)
-                part_path = Path(str(ep_path) + ".part")
-                if part_path.exists():
-                    part_path.unlink()
+                        try:
+                            if server_type == "express":
+                                logging.info("Trying express (mail.ru)")
+                                success = download_from_mailru(server["url"], ep_path)
+                            elif server_type == "arabhd":
+                                logging.info("Trying Arab HD")
+                                stream_url = get_arabhd_stream_url(server["id"])
+                                if stream_url:
+                                    success = download_from_hls(stream_url, ep_path)
+                                else:
+                                    logging.warning("Could not get Arab HD stream URL")
+
+                            if success:
+                                break
+                        except Exception as e:
+                            logging.warning("Server %s failed: %s", server_type, e)
+                            part_path = Path(str(ep_path) + ".part")
+                            if part_path.exists():
+                                part_path.unlink()
+                            continue
+
+                    if not success:
+                        logging.error("All servers failed for episode %d", ep_num)
+
+                    time.sleep(5)
+
+                except Exception as e:
+                    logging.error("Failed to download episode %d: %s", ep_num, e)
+                    part_path = Path(str(ep_path) + ".part")
+                    if part_path.exists():
+                        part_path.unlink()
 
         except Exception as e:
             logging.error("Error processing %s: %s", series_name, e)

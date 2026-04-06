@@ -33,3 +33,5 @@ download:
   preferred_servers:
     - "express"
     - "arabhd"
+  # Number of latest episodes to keep/download per series
+  max_episodes_per_series: 2
